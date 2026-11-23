@@ -14,7 +14,7 @@
     "pm2:start": "pm2 start ecosystem.config.cjs",
     "pm2:restart": "pm2 restart meridian --update-env",
     "pm2:logs": "pm2 logs meridian --lines 100",
-    "dev": "DRY_RUN=true node index.js",
+    "dev": "node -e \"process.env.DRY_RUN='true';import('./index.js')\"",
     "test": "npm run test:syntax && npm run test:standalone && node --test test/cleanup.test.js",
     "test:syntax": "node scripts/check-syntax.js",
     "postinstall": "node scripts/patch-anchor.js",
