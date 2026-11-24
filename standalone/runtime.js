@@ -12,6 +12,8 @@ import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
 import { MonitorStore, finishSignal } from "./store.js";
 import { recordSignalOutcome } from "./wallet-quality.js";
+import { fetchGmgn, gmgnVerdict, gmgnLine, gmgnEnabled } from "./gmgn.js";
+import { listSmartWallets } from "../smart-wallets.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
@@ -23,12 +25,39 @@ import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
 
+// Data GMGN disimpan sekali bagi setiap mint (elak panggilan berulang).
+const gmgnCache = new Map();
+function gmgnFor(mint) {
+  if (!gmgnEnabled()) return Promise.resolve(null);
+  if (!gmgnCache.has(mint)) {
+    gmgnCache.set(mint, fetchGmgn(mint).catch(e => ({ error: e.message })));
+    if (gmgnCache.size > 200) gmgnCache.delete(gmgnCache.keys().next().value);
+  }
+  return gmgnCache.get(mint);
+}
+
+function walletNames(signal) {
+  let list = [];
+  try { list = listSmartWallets().wallets; } catch {}
+  return (signal.events || []).map(e => list.find(w => w.address === e.wallet)?.name || e.wallet.slice(0, 6)).join(" + ");
+}
+
+// Ringkasan setiap signal ke Telegram (keputusan + data GMGN jika ada).
+async function notifySignalOutcome(signal, reason) {
+  const passed = /^(shadow proposal recorded|entered)/.test(reason);
+  const g = gmgnEnabled() ? await gmgnFor(signal.mint) : null;
+  const head = `📡 Signal ${signal.mint.slice(0, 8)} (${walletNames(signal)})`;
+  const verdict = passed ? "✅ LULUS saringan" : `❌ Ditolak: ${String(reason).replace(/^blocked:\s*/, "")}`;
+  await notify([head, verdict, gmgnLine(g)].filter(Boolean).join("\n"));
+}
+
 // Tamatkan signal + rekod kualiti wallet (amaran Telegram jika perlu).
 function finish(signal, reason) {
   finishSignal(store, signal, reason, config.standalone);
   try {
     for (const msg of recordSignalOutcome(signal, reason)) { log("wallet_quality", msg.replace(/\n/g, " | ")); void notify(msg); }
   } catch (e) { log("wallet_quality_warn", e.message); }
+  void notifySignalOutcome(signal, reason).catch(() => {});
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -78,6 +107,7 @@ async function drainSignals() {
 async function pursueSignal(signal) {
   const wallets = signal.events.map(e => `${e.wallet.slice(0, 6)}(◎${e.depositSol.toFixed(1)})`).join(", ");
   log("signal", `Convergence on ${signal.mint.slice(0, 8)}: ${signal.events.length} wallets [${wallets}] — screening with ${config.standalone.screeningDeadlineSec}s deadline`);
+  void gmgnFor(signal.mint); // mula ambil data GMGN awal, selari dengan saringan
   let lastReason = "no attempt";
   while (!shuttingDown && !signal.done && Date.now() < signal.deadline) {
     const reason = await attemptEntry(signal);
@@ -128,6 +158,17 @@ async function attemptEntry(signal) {
       return null;
     }
     return screened.reason;
+  }
+
+  // Saringan tambahan GMGN (hanya bila GMGN_API_KEY ada). Data yang gagal
+  // dibaca tidak menghalang kemasukan; saringan asal yunus tetap terpakai.
+  const g = await gmgnFor(mint);
+  if (g?.error) log("gmgn_warn", `${mint.slice(0, 8)}: ${g.error}`);
+  const gmgnReason = gmgnVerdict(g);
+  if (gmgnReason) {
+    log("signal", `Signal ${mint.slice(0, 8)} blocked by GMGN: ${gmgnReason}`);
+    finish(signal, `blocked: ${gmgnReason}`);
+    return null;
   }
 
   const gate = await finalRecheck(signal, screened);
