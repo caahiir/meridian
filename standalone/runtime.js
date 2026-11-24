@@ -13,6 +13,7 @@ import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
 import { MonitorStore, finishSignal } from "./store.js";
 import { recordSignalOutcome } from "./wallet-quality.js";
 import { fetchGmgn, gmgnVerdict, gmgnLine, gmgnEnabled } from "./gmgn.js";
+import { fetchRugcheck, rugcheckVerdict, rugcheckLine, rugcheckEnabled } from "./rugcheck.js";
 import { listSmartWallets } from "../smart-wallets.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
@@ -36,6 +37,17 @@ function gmgnFor(mint) {
   return gmgnCache.get(mint);
 }
 
+// Data RugCheck disimpan sekali bagi setiap mint.
+const rugcheckCache = new Map();
+function rugcheckFor(mint) {
+  if (!rugcheckEnabled()) return Promise.resolve(null);
+  if (!rugcheckCache.has(mint)) {
+    rugcheckCache.set(mint, fetchRugcheck(mint).catch(e => ({ error: e.message })));
+    if (rugcheckCache.size > 200) rugcheckCache.delete(rugcheckCache.keys().next().value);
+  }
+  return rugcheckCache.get(mint);
+}
+
 function walletNames(signal) {
   let list = [];
   try { list = listSmartWallets().wallets; } catch {}
@@ -45,10 +57,10 @@ function walletNames(signal) {
 // Ringkasan setiap signal ke Telegram (keputusan + data GMGN jika ada).
 async function notifySignalOutcome(signal, reason) {
   const passed = /^(shadow proposal recorded|entered)/.test(reason);
-  const g = gmgnEnabled() ? await gmgnFor(signal.mint) : null;
+  const [g, rc] = await Promise.all([gmgnEnabled() ? gmgnFor(signal.mint) : null, rugcheckFor(signal.mint)]);
   const head = `📡 Signal ${signal.mint.slice(0, 8)} (${walletNames(signal)})`;
   const verdict = passed ? "✅ LULUS saringan" : `❌ Ditolak: ${String(reason).replace(/^blocked:\s*/, "")}`;
-  await notify([head, verdict, gmgnLine(g)].filter(Boolean).join("\n"));
+  await notify([head, verdict, rugcheckLine(rc), gmgnLine(g)].filter(Boolean).join("\n"));
 }
 
 // Tamatkan signal + rekod kualiti wallet (amaran Telegram jika perlu).
@@ -107,7 +119,8 @@ async function drainSignals() {
 async function pursueSignal(signal) {
   const wallets = signal.events.map(e => `${e.wallet.slice(0, 6)}(◎${e.depositSol.toFixed(1)})`).join(", ");
   log("signal", `Convergence on ${signal.mint.slice(0, 8)}: ${signal.events.length} wallets [${wallets}] — screening with ${config.standalone.screeningDeadlineSec}s deadline`);
-  void gmgnFor(signal.mint); // mula ambil data GMGN awal, selari dengan saringan
+  void gmgnFor(signal.mint); // mula ambil data GMGN/RugCheck awal, selari dengan saringan
+  void rugcheckFor(signal.mint);
   let lastReason = "no attempt";
   while (!shuttingDown && !signal.done && Date.now() < signal.deadline) {
     const reason = await attemptEntry(signal);
@@ -168,6 +181,17 @@ async function attemptEntry(signal) {
   if (gmgnReason) {
     log("signal", `Signal ${mint.slice(0, 8)} blocked by GMGN: ${gmgnReason}`);
     finish(signal, `blocked: ${gmgnReason}`);
+    return null;
+  }
+
+  // Saringan tambahan RugCheck (percuma, tanpa key). Data yang gagal dibaca
+  // tidak menghalang kemasukan.
+  const rc = await rugcheckFor(mint);
+  if (rc?.error) log("rugcheck_warn", `${mint.slice(0, 8)}: ${rc.error}`);
+  const rcReason = rugcheckVerdict(rc);
+  if (rcReason) {
+    log("signal", `Signal ${mint.slice(0, 8)} blocked by RugCheck: ${rcReason}`);
+    finish(signal, `blocked: ${rcReason}`);
     return null;
   }
 
