@@ -11,6 +11,7 @@ import { log } from "../logger.js";
 import { repoPath } from "../repo-root.js";
 import { sendMessage as tgSend, isEnabled as tgEnabled } from "../telegram.js";
 import { MonitorStore, finishSignal } from "./store.js";
+import { recordSignalOutcome } from "./wallet-quality.js";
 import { WalletMonitor } from "./monitor.js";
 import { screenMint, poolDetail } from "./screening.js";
 import { exposureStillPresent } from "./events.js";
@@ -21,6 +22,14 @@ import { getTrackedPositions, confirmPeak, updatePnlAndCheckExits, registerExitS
 import { recordPositionSnapshot } from "../pool-memory.js";
 import { getDeterministicCloseRule, computeBinsBelow } from "../exit-rules.js";
 import { startAdmin } from "./telegram-admin.js";
+
+// Tamatkan signal + rekod kualiti wallet (amaran Telegram jika perlu).
+function finish(signal, reason) {
+  finishSignal(store, signal, reason, config.standalone);
+  try {
+    for (const msg of recordSignalOutcome(signal, reason)) { log("wallet_quality", msg.replace(/\n/g, " | ")); void notify(msg); }
+  } catch (e) { log("wallet_quality_warn", e.message); }
+}
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -55,7 +64,7 @@ async function drainSignals() {
       try {
         await pursueSignal(signal);
       } catch (e) {
-        finishSignal(store, signal, `error: ${e.message}`, config.standalone);
+        finish(signal, `error: ${e.message}`);
         log("signal_error", `Signal ${signal.mint.slice(0, 8)} aborted: ${e.message}`);
       }
     }
@@ -78,7 +87,7 @@ async function pursueSignal(signal) {
     if (wait > 0) await sleep(wait);
   }
   if (!signal.done) {
-    finishSignal(store, signal, lastReason, config.standalone);
+    finish(signal, lastReason);
     log("signal", `Signal ${signal.mint.slice(0, 8)} expired: ${lastReason}`);
   }
 }
@@ -90,11 +99,11 @@ async function attemptEntry(signal) {
   const attempt = store.data.attempts[mint];
   // One attempt chain per mint; bounded retries only for temporary failures.
   if (attempt && ["entered", "proposed", "submitting"].includes(attempt.status)) {
-    finishSignal(store, signal, `mint already attempted (${attempt.status})`, config.standalone);
+    finish(signal, `mint already attempted (${attempt.status})`);
     return null;
   }
   if (attempt?.status === "failed" && (attempt.failures ?? 0) >= 2) {
-    finishSignal(store, signal, "deploy failed repeatedly", config.standalone);
+    finish(signal, "deploy failed repeatedly");
     return null;
   }
 
@@ -102,7 +111,7 @@ async function attemptEntry(signal) {
   const positions = await getMyPositions({ force: true }).catch(() => null);
   if (!positions || positions.error || !Array.isArray(positions.positions)) return "position read unavailable";
   if (positions.positions.length >= config.risk.maxPositions) {
-    finishSignal(store, signal, "portfolio full", config.standalone);
+    finish(signal, "portfolio full");
     return null;
   }
 
@@ -115,7 +124,7 @@ async function attemptEntry(signal) {
   }
   if (!screened.pass) {
     if (screened.terminal) {
-      finishSignal(store, signal, `blocked: ${screened.reason}`, config.standalone);
+      finish(signal, `blocked: ${screened.reason}`);
       return null;
     }
     return screened.reason;
@@ -128,7 +137,7 @@ async function attemptEntry(signal) {
   if (balances.error || !Number.isFinite(balances.sol)) return "balance read unavailable";
   const amountY = computeDeployAmount(balances.sol);
   if (balances.sol < config.management.minSolToOpen + config.management.gasReserve) {
-    finishSignal(store, signal, "insufficient spendable SOL", config.standalone);
+    finish(signal, "insufficient spendable SOL");
     return null;
   }
 
@@ -169,7 +178,7 @@ async function attemptEntry(signal) {
     record.txs = result.txs ?? [];
     record.amountSol = amountY;
     store.save();
-    finishSignal(store, signal, record.status === "proposed" ? "shadow proposal recorded" : "entered", config.standalone);
+    finish(signal, record.status === "proposed" ? "shadow proposal recorded" : "entered");
     const label = result.dry_run ? "[SHADOW] Would deploy" : "Deployed";
     log("entry", `${label} ${amountY} SOL → pool ${pool.pool_address.slice(0, 8)} mint ${mint.slice(0, 8)} (${binsBelow} bins below, ${signal.events.length}-wallet convergence)`);
     void notify(`${result.dry_run ? "🕯️ Shadow proposal" : "✅ Entry"}: ${amountY} SOL → ${pool.pool_address.slice(0, 8)} (mint ${mint.slice(0, 8)}, ${signal.events.length} wallets)`);

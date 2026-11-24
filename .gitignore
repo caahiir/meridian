@@ -52,3 +52,6 @@ discord-signals.json
 wallet-monitor-state.json
 wallet-monitor-state.json.tmp
 standalone.lock
+
+# Wallet quality tracker (tambahan)
+wallet-quality.json
