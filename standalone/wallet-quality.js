@@ -31,7 +31,10 @@ function nameOf(address) {
 // Pulangkan senarai mesej amaran (kosong jika tiada).
 export function recordSignalOutcome(signal, reason, now = Date.now()) {
   const text = String(reason || "");
-  const outcome = PASSED.some(p => text.startsWith(p)) ? "passed" : NEUTRAL.some(p => text.startsWith(p)) ? "neutral" : "rejected";
+  // Data yang tidak dapat dibaca (contoh "volume outside limits or unknown")
+  // bukan bukti wallet itu lemah, jadi dikira neutral.
+  const dataUnknown = /\bunknown\b|unavailable/i.test(text);
+  const outcome = PASSED.some(p => text.startsWith(p)) ? "passed" : (dataUnknown || NEUTRAL.some(p => text.startsWith(p))) ? "neutral" : "rejected";
   const data = load();
   const alerts = [];
   const key = reasonKey(text);
